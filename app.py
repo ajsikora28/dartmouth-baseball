@@ -1,21 +1,20 @@
+# app.py
 import streamlit as st
 import pandas as pd
 import os
+import json
 from datetime import datetime
 
-# Custom color scheme
+# --------- config ----------
+DATA_DIR = "data"
+SCHEDULE_FILE = os.path.join(DATA_DIR, "schedule.json")
 PRIMARY_COLOR = "#00693e"
 SECONDARY_COLOR = "#12312b"
+# ---------------------------
 
-# Apply minimal custom CSS styling: only set the main page background
+# Minimal CSS
 st.markdown(f"""
     <style>
-    :root {{
-        --primary-color: {PRIMARY_COLOR};
-        --secondary-color: {SECONDARY_COLOR};
-    }}
-
-    /* Only color the main app background; leave all other styles default */
     .stApp {{
         background-color: {SECONDARY_COLOR} !important;
     }}
@@ -25,59 +24,40 @@ st.markdown(f"""
 st.title("Dartmouth Baseball Analytics")
 st.header("Schedule")
 
-# Initialize state
+os.makedirs(DATA_DIR, exist_ok=True)
+
+# ----- helpers for persistence -----
+def load_schedule() -> pd.DataFrame:
+    if os.path.exists(SCHEDULE_FILE):
+        try:
+            with open(SCHEDULE_FILE, "r", encoding="utf8") as fh:
+                data = json.load(fh)
+            return pd.DataFrame(data)
+        except Exception:
+            return pd.DataFrame(columns=["Date", "Opponent", "Trackman CSV", "PxP CSV", "Year"])
+    else:
+        return pd.DataFrame(columns=["Date", "Opponent", "Trackman CSV", "PxP CSV", "Year"])
+
+def save_schedule(df: pd.DataFrame):
+    # convert datelike objects to ISO strings for JSON
+    copy = df.copy()
+    if "Date" in copy.columns:
+        copy["Date"] = copy["Date"].astype(str)
+    with open(SCHEDULE_FILE, "w", encoding="utf8") as fh:
+        json.dump(copy.to_dict(orient="records"), fh, indent=2, ensure_ascii=False)
+
+# ----- session state initialization -----
 if "years" not in st.session_state:
     st.session_state.years = [2023, 2024, 2025]
 
 if "selected_year" not in st.session_state:
     st.session_state.selected_year = st.session_state.years[0]
 
-if "adding_year" not in st.session_state:
-    st.session_state.adding_year = False
-
-# Prepare dropdown options
-year_options = st.session_state.years + ["Add new year..."]
-
-def on_year_select():
-    selected = st.session_state.year_select
-    if selected == "Add new year...":
-        st.session_state.adding_year = True
-    else:
-        st.session_state.selected_year = selected
-        st.session_state.adding_year = False
-
-# Show dropdown, set index to selected_year if it exists
-index = year_options.index(st.session_state.selected_year) if st.session_state.selected_year in year_options else 0
-st.selectbox("Select Season", year_options, index=index, key="year_select", on_change=on_year_select)
-
-# Show modal dialog for adding a new year
-@st.dialog("Add New Year")
-def add_year_dialog():
-    new_year = st.number_input("Enter new year", min_value=2000, max_value=2100, step=1, key="new_year_input")
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Add", use_container_width=True):
-            if new_year not in st.session_state.years:
-                st.session_state.years.append(new_year)
-                st.session_state.years.sort()  # insert in chronological order
-                st.session_state.selected_year = new_year  # select new year
-            st.session_state.adding_year = False  # hide input
-            st.rerun()
-    with col2:
-        if st.button("Cancel", use_container_width=True):
-            st.session_state.adding_year = False
-            st.rerun()
-
-# Trigger the dialog if adding_year is True
-if st.session_state.adding_year:
-    add_year_dialog()
-
-# Initialize schedule
+# load schedule into session state on first run
 if "schedule" not in st.session_state:
-    # keep a Year column so we can filter by season when DB is added
-    st.session_state.schedule = pd.DataFrame(columns=["Date", "Opponent", "Trackman CSV", "PxP CSV", "Year"])
+    st.session_state.schedule = load_schedule()
 
-# Helper to extract year from a Date-like value
+# helper to get year from date-like values
 def _get_year(d):
     try:
         return d.year
@@ -87,96 +67,115 @@ def _get_year(d):
         except Exception:
             return None
 
-# Display schedule (only show games for the selected season)
-filtered_schedule = st.session_state.schedule[st.session_state.schedule["Year"] == st.session_state.selected_year]
-st.dataframe(filtered_schedule[["Date", "Opponent", "Trackman CSV", "PxP CSV"]])
+# ------ Year selection + inline add-year form ------
+year_options = st.session_state.years + ["Add new year..."]
 
-# Add a game manually
-st.subheader("Add a Game")
-# Set default date to January 1st of the selected year
-default_date = datetime(year=st.session_state.selected_year, month=1, day=1).date()
-date = st.date_input("Date", value=default_date)
-opponent = st.text_input("Opponent")
-if st.button("Add Game"):
-    new_row = {"Date": date, "Opponent": opponent, "Trackman CSV": "", "PxP CSV": "", "Year": _get_year(date)}
-    st.session_state.schedule = pd.concat([
-        st.session_state.schedule,
-        pd.DataFrame([new_row])
-    ], ignore_index=True)
-    st.success("Game added!")
-    st.rerun()
+# show selectbox; choose index of selected_year if present
+index = year_options.index(st.session_state.selected_year) if st.session_state.selected_year in year_options else 0
+choice = st.selectbox("Select Season", year_options, index=index)
 
-# Manage Games with dialog
-if "managing_game_idx" not in st.session_state:
-    st.session_state.managing_game_idx = None
-
-st.subheader("Manage Games")
-
-if len(st.session_state.schedule) > 0:
-    # Only offer games in the selected season
-    filtered = st.session_state.schedule[st.session_state.schedule["Year"] == st.session_state.selected_year].reset_index()
-    game_options = [f"{row['Date']} vs {row['Opponent']}" for _, row in filtered.iterrows()]
-    orig_indices = list(filtered['index'])
-
-    def on_game_select():
-        selected = st.session_state.game_select
-        if selected != "Select a game...":
-            idx_in_options = game_options.index(selected)
-            # Map the selected option back to the original schedule index
-            st.session_state.managing_game_idx = orig_indices[idx_in_options]
-
-    # If a previous run requested the game_select to be cleared, do that
-    # before instantiating the selectbox widget to avoid Streamlit errors
-    if st.session_state.get("clear_game_select", False):
-        st.session_state.game_select = "Select a game..."
-        st.session_state.pop("clear_game_select", None)
-
-    st.selectbox("Select a game to manage", ["Select a game..."] + game_options, key="game_select", on_change=on_game_select)
-
-    # Show modal dialog for managing a selected game
-    @st.dialog("Manage Game")
-    def manage_game_dialog():
-        idx = st.session_state.managing_game_idx
-        row = st.session_state.schedule.loc[idx]
-
-        st.write(f"**{row['Date']} vs {row['Opponent']}**")
-
-        # Upload Trackman
-        trackman_file = st.file_uploader(f"Trackman CSV for {row['Opponent']}", type="csv", key=f"trackman_{idx}")
-        if trackman_file:
-            os.makedirs("data", exist_ok=True)
-            trackman_path = os.path.join("data", f"trackman_{st.session_state.selected_year}_{row['Opponent']}.csv")
-            with open(trackman_path, "wb") as f:
-                f.write(trackman_file.getbuffer())
-            st.session_state.schedule.at[idx, "Trackman CSV"] = trackman_path
-            st.success("Trackman file saved!")
-            st.rerun()
-
-        # Upload PxP
-        pxp_file = st.file_uploader(f"PxP CSV for {row['Opponent']}", type="csv", key=f"pxp_{idx}")
-        if pxp_file:
-            os.makedirs("data", exist_ok=True)
-            pxp_path = os.path.join("data", f"pxp_{st.session_state.selected_year}_{row['Opponent']}.csv")
-            with open(pxp_path, "wb") as f:
-                f.write(pxp_file.getbuffer())
-            st.session_state.schedule.at[idx, "PxP CSV"] = pxp_path
-            st.success("PxP file saved!")
-            st.rerun()
-
-        # Delete game button
-        if st.button(f"Delete Game: {row['Opponent']}", use_container_width=True):
-            st.session_state.schedule = st.session_state.schedule.drop(idx).reset_index(drop=True)
-            st.session_state.managing_game_idx = None
-            st.success(f"Game vs {row['Opponent']} deleted!")
-            st.rerun()
-
-    # Trigger the dialog if a game is selected. Show it once and then
-    # reset the managing index and request that the selectbox be cleared
-    # on the next run. Do NOT call st.rerun() here — calling rerun
-    # immediately would interrupt the dialog lifecycle.
-    if st.session_state.managing_game_idx is not None:
-        manage_game_dialog()
-        st.session_state.managing_game_idx = None
-        st.session_state.clear_game_select = True
+if choice == "Add new year...":
+    # Using a form so submit triggers a clean rerun
+    with st.form("add_year_form", clear_on_submit=True):
+        new_year = st.number_input("Enter new year", min_value=2000, max_value=2100, step=1, value=datetime.now().year)
+        submitted = st.form_submit_button("Add year")
+        if submitted:
+            if new_year not in st.session_state.years:
+                st.session_state.years.append(int(new_year))
+                st.session_state.years.sort()
+            st.session_state.selected_year = int(new_year)
+            st.success(f"Added and selected {new_year}")
+            # persist nothing else needed here — the rerun will update UI
 else:
-    st.write("No games added yet.")
+    st.session_state.selected_year = choice
+
+st.write(f"Current selected year: **{st.session_state.selected_year}**")
+
+# ------ Display schedule filtered by year ------
+df_schedule = st.session_state.schedule.copy()
+# normalize Date column to string for display
+if not df_schedule.empty and "Year" in df_schedule.columns:
+    filtered_schedule = df_schedule[df_schedule["Year"] == int(st.session_state.selected_year)]
+else:
+    filtered_schedule = pd.DataFrame(columns=["Date", "Opponent", "Trackman CSV", "PxP CSV", "Year"])
+
+st.subheader("Season Schedule")
+st.dataframe(filtered_schedule[["Date", "Opponent", "Trackman CSV", "PxP CSV"]], use_container_width=True)
+
+# ------ Add a game form ------
+st.subheader("Add a Game")
+with st.form("add_game_form", clear_on_submit=True):
+    default_date = datetime(year=int(st.session_state.selected_year), month=1, day=1).date()
+    date_input = st.date_input("Date", value=default_date)
+    opponent_input = st.text_input("Opponent")
+    add_game_btn = st.form_submit_button("Add Game")
+    if add_game_btn:
+        if not opponent_input:
+            st.warning("Please enter an opponent name.")
+        else:
+            new_row = {
+                "Date": str(date_input),  # store as string for JSON
+                "Opponent": opponent_input,
+                "Trackman CSV": "",
+                "PxP CSV": "",
+                "Year": int(_get_year(date_input))
+            }
+            st.session_state.schedule = pd.concat([st.session_state.schedule, pd.DataFrame([new_row])], ignore_index=True)
+            save_schedule(st.session_state.schedule)
+            st.success("Game added!")
+
+# ------ Manage existing games (one at a time) ------
+st.subheader("Manage Games")
+# Only show games for the selected season
+season_games = st.session_state.schedule[st.session_state.schedule["Year"] == int(st.session_state.selected_year)].reset_index()
+if season_games.empty:
+    st.info("No games added yet for this season.")
+else:
+    # build label and original index mapping
+    labels = [f"{row['Date']} — {row['Opponent']}" for _, row in season_games.iterrows()]
+    sel = st.selectbox("Choose a game to manage", ["(select)"] + labels)
+    if sel != "(select)":
+        sel_idx = labels.index(sel)
+        orig_idx = int(season_games.loc[sel_idx, "index"])
+        row = st.session_state.schedule.loc[orig_idx]
+
+        # Use expander to show the manage UI
+        with st.expander(f"Manage: {row['Date']} — {row['Opponent']}", expanded=True):
+            st.write(f"Trackman file: {row.get('Trackman CSV','') or 'None'}")
+            st.write(f"PxP file: {row.get('PxP CSV','') or 'None'}")
+
+            # upload Trackman
+            with st.form(f"upload_trackman_{orig_idx}", clear_on_submit=True):
+                trackman_file = st.file_uploader("Upload Trackman CSV", type=["csv"], key=f"tm_{orig_idx}")
+                submit_tm = st.form_submit_button("Save Trackman")
+                if submit_tm and trackman_file:
+                    safe_op = "".join(c for c in row['Opponent'] if c.isalnum() or c in (" ", "-", "_")).strip().replace(" ", "_")
+                    filename = f"trackman_{st.session_state.selected_year}_{safe_op}.csv"
+                    path = os.path.join(DATA_DIR, filename)
+                    with open(path, "wb") as fh:
+                        fh.write(trackman_file.getbuffer())
+                    st.session_state.schedule.at[orig_idx, "Trackman CSV"] = path
+                    save_schedule(st.session_state.schedule)
+                    st.success("Saved Trackman CSV")
+
+            # upload PxP
+            with st.form(f"upload_pxp_{orig_idx}", clear_on_submit=True):
+                pxp_file = st.file_uploader("Upload play-by-play (PxP) CSV", type=["csv"], key=f"pxp_{orig_idx}")
+                submit_pxp = st.form_submit_button("Save PxP")
+                if submit_pxp and pxp_file:
+                    safe_op = "".join(c for c in row['Opponent'] if c.isalnum() or c in (" ", "-", "_")).strip().replace(" ", "_")
+                    filename = f"pxp_{st.session_state.selected_year}_{safe_op}.csv"
+                    path = os.path.join(DATA_DIR, filename)
+                    with open(path, "wb") as fh:
+                        fh.write(pxp_file.getbuffer())
+                    st.session_state.schedule.at[orig_idx, "PxP CSV"] = path
+                    save_schedule(st.session_state.schedule)
+                    st.success("Saved PxP CSV")
+
+            # delete button
+            if st.button("Delete game", key=f"del_{orig_idx}"):
+                st.session_state.schedule = st.session_state.schedule.drop(orig_idx).reset_index(drop=True)
+                save_schedule(st.session_state.schedule)
+                st.success("Game deleted")
+                # After deletion, selecting the default in the next run is fine.
+
