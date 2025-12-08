@@ -171,6 +171,26 @@ else:
                     st.session_state.schedule.at[orig_idx, "PxP CSV"] = path
                     save_schedule(st.session_state.schedule)
                     st.success("Saved PxP CSV")
+                    
+                    # ----------------------
+                    # RUN ALIGNMENT AUTOMATICALLY
+                    # ----------------------
+                    trackman_path = st.session_state.schedule.at[orig_idx, "Trackman CSV"]
+                    pxp_path = st.session_state.schedule.at[orig_idx, "PxP CSV"]
+
+                    if trackman_path and pxp_path:
+                        try:
+                            df_tm = pd.read_csv(trackman_path)
+                            df_px = pd.read_csv(pxp_path)
+                            from align import align_game  # make sure align.py is importable
+                            # run alignment
+                            mapped_df = align_game(df_tm, df_px, game_id=f"{st.session_state.selected_year}_{safe_op}")
+                            st.success("Alignment successful! No anomalies detected.")
+                            st.dataframe(mapped_df)  # optional: show the merged debug table
+                        except ValueError as ve:
+                            st.error(f"Alignment failed with the following issues:\n{ve}")
+                        except Exception as e:
+                            st.error(f"Unexpected error during alignment: {e}")
 
             # delete button
             if st.button("Delete game", key=f"del_{orig_idx}"):
