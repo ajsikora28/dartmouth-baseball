@@ -171,26 +171,30 @@ else:
                     st.session_state.schedule.at[orig_idx, "PxP CSV"] = path
                     save_schedule(st.session_state.schedule)
                     st.success("Saved PxP CSV")
-                    
-                    # ----------------------
-                    # RUN ALIGNMENT AUTOMATICALLY
-                    # ----------------------
-                    trackman_path = st.session_state.schedule.at[orig_idx, "Trackman CSV"]
-                    pxp_path = st.session_state.schedule.at[orig_idx, "PxP CSV"]
 
-                    if trackman_path and pxp_path:
+                    # ----- Run alignment if Trackman file exists -----
+                    trackman_path = row.get("Trackman CSV", "")
+                    if trackman_path and os.path.exists(trackman_path):
                         try:
+                            import align  # make sure align.py is in the same folder or installed as a module
                             df_tm = pd.read_csv(trackman_path)
-                            df_px = pd.read_csv(pxp_path)
-                            from align import align_game  # make sure align.py is importable
-                            # run alignment
-                            mapped_df = align_game(df_tm, df_px, game_id=f"{st.session_state.selected_year}_{safe_op}")
-                            st.success("Alignment successful! No anomalies detected.")
-                            st.dataframe(mapped_df)  # optional: show the merged debug table
-                        except ValueError as ve:
-                            st.error(f"Alignment failed with the following issues:\n{ve}")
+                            df_px = pd.read_csv(path)
+                            game_id = f"{st.session_state.selected_year}_{safe_op}"
+
+                            merged = align.align_game(df_tm, df_px, game_id)
+
+                            # Save merged CSV
+                            merged_filename = f"merged_{game_id}.csv"
+                            merged_path = os.path.join(DATA_DIR, merged_filename)
+                            merged.to_csv(merged_path, index=False)
+                            st.success(f"Alignment successful! Merged file saved to {merged_path}")
+
+                        except ValueError as e:
+                            st.error(f"Alignment failed with errors:\n{e}")
                         except Exception as e:
-                            st.error(f"Unexpected error during alignment: {e}")
+                            st.error(f"Unexpected error during alignment:\n{e}")
+                    else:
+                        st.info("Trackman file not uploaded yet. Alignment will run once both files are available.")
 
             # delete button
             if st.button("Delete game", key=f"del_{orig_idx}"):
