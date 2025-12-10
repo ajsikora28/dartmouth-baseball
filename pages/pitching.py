@@ -7,6 +7,7 @@ import os
 from glob import glob
 from typing import List
 from align import safe_col
+import re
 
 st.set_page_config(page_title="Pitching", layout="wide")
 st.title("Pitching")
@@ -50,6 +51,11 @@ def title_case_col(tm_col, px_col):
     else:
         return pd.Series(["Unknown"] * len(df))
     
+def format_result(s):
+    if s in {"FoulBallFieldable", "FoulBallNotFieldable"}:
+        return "Foul Ball"
+    return re.sub(r"(?<=[a-zA-Z])(?=[A-Z])", " ", s)
+    
 # Pitch types
 PITCH_TYPE_MAPPING = {
     1: "Four-Seam Fastball",
@@ -74,22 +80,39 @@ def col(lower_name: str):
 # -----------------------------
 # Multiselect helper with Select all button only
 # -----------------------------
-def ms_with_select_all(label: str, options: List[str], key_prefix: str) -> List[str]:
-    options = list(options)
+def ms_with_select_all(label: str, options: list, key_prefix: str) -> list:
     sel_key = f"{key_prefix}_sel"
-    ms_key = f"{key_prefix}_ms"
+    pending_key = f"{key_prefix}_pending"
 
+    # Initialize session state if missing
     if sel_key not in st.session_state:
         st.session_state[sel_key] = list(options)
+    if pending_key not in st.session_state:
+        st.session_state[pending_key] = False
 
-    selection = st.multiselect(label, options, default=st.session_state[sel_key], key=ms_key)
-    st.session_state[sel_key] = selection
-
-    # Select all button
-    if st.button("Select all", key=f"{key_prefix}_select_all"):
+    # If pending select-all from previous run, apply it before creating widget
+    if st.session_state[pending_key]:
         st.session_state[sel_key] = list(options)
+        st.session_state[pending_key] = False
+
+    # Multiselect with key parameter — automatically syncs to session_state
+    st.multiselect(label, options, default=st.session_state[sel_key], key=sel_key)
+
+    # Button below multiselect — set pending and rerun
+    if st.button(f"Select all", key=f"{key_prefix}_btn"):
+        st.session_state[pending_key] = True
+        st.rerun()
 
     return st.session_state[sel_key]
+
+
+
+
+
+
+
+
+
 
 # -----------------------------
 # Column definitions with fallback
@@ -116,6 +139,10 @@ strikes_col = fallback_col("Strikes_px", "Strikes_tm")
 outs_col = fallback_col("Outs_px", "Outs_tm")
 pitch_type_col = fallback_col("PitchType_tm", "PitchType_px")
 vel_col = fallback_col("RelSpeed_tm", "RelSpeed_px")
+playresult_col = fallback_col("PlayResult_px", "PlayResult_tm")
+korbb_col = fallback_col("KorBB_px", "KorBB_tm")
+pitchcall_col = fallback_col("PitchCall_px", "PitchCall_tm")
+hittype_col = fallback_col("HitType_px", "HitType_tm")
 
 # -----------------------------
 # Prepare option lists
@@ -127,7 +154,13 @@ batters_all = sorted(df[batter_col].dropna().unique())
 pitchers_all = sorted(df[pitcher_col].dropna().unique())
 batter_hands_all = sorted(df[bhand_col].dropna().unique()) if bhand_col else []
 pitcher_hands_all = sorted(df[phand_col].dropna().unique()) if phand_col else []
-
+hittype_all = sorted(map(format_result, df[hittype_col].dropna().astype(str).unique())) if hittype_col else []
+results_all = sorted(
+    {"Out (all)", "Out (in play)"} |
+    set(map(format_result, df[playresult_col].dropna().astype(str))) - {"Out"} |
+    set(map(format_result, df[korbb_col].dropna().astype(str))) |
+    (set(map(format_result, df[pitchcall_col].dropna().astype(str))))
+)
 counts_all = sorted([f"{b}-{s}" for b in sorted(df[balls_col].dropna().unique()) for s in sorted(df[strikes_col].dropna().unique())]) if balls_col and strikes_col else []
 outs_all = sorted(df[outs_col].dropna().astype(int).astype(str).unique()) if outs_col else []
 if pitch_type_col in df.columns:
@@ -141,14 +174,24 @@ if pitch_type_col in df.columns:
 else:
     pitch_types_all = []
 
-
-vel_min = float(df[vel_col].min()) if vel_col else 0
-vel_max = float(df[vel_col].max()) if vel_col else 100
+# -----------------------------
+# Determine integer velocity bounds (no UI here)
+# -----------------------------
+if vel_col and vel_col in df.columns:
+    vel_values_all = pd.to_numeric(df[vel_col], errors="coerce")
+    # fallback if all NaN
+    if vel_values_all.dropna().empty:
+        vel_min, vel_max = 0, 100
+    else:
+        vel_min = int(np.floor(vel_values_all.min()))
+        vel_max = int(np.ceil(vel_values_all.max()))
+else:
+    vel_min, vel_max = 0, 100
 
 # -----------------------------
 # Sidebar filters
 # -----------------------------
-st.sidebar.header("Filters (multiselects)")
+# st.sidebar.header("Filters (multiselects)")
 
 selected_years = ms_with_select_all("Year", years, "year") if years else []
 selected_games = ms_with_select_all("Game", games, "game") if games else []
@@ -159,7 +202,24 @@ selected_batter_hands = ms_with_select_all("Batter Hand", batter_hands_all, "bat
 selected_pitcher_hands = ms_with_select_all("Pitcher Hand", pitcher_hands_all, "pitcher_hand") if pitcher_hands_all else []
 selected_outs = ms_with_select_all("Outs", outs_all, "outs") if outs_all else []
 selected_pitch_types = ms_with_select_all("Pitch Type", pitch_types_all, "pitch_type") if pitch_types_all else []
-selected_vel = st.sidebar.slider("Velocity (mph)", float(vel_min), float(vel_max), (float(vel_min), float(vel_max)))
+selected_results = ms_with_select_all("Result", results_all, "result") if results_all else []
+selected_hittypes = ms_with_select_all("Hit Type (for balls in play)", hittype_all, "hittype") if hittype_all else []
+
+# -----------------------------
+# Velocity slider on the main page (integer steps)
+# -----------------------------
+if vel_col and vel_col in df.columns:
+    selected_vel = st.slider(
+        "Velocity (mph)",
+        min_value=int(vel_min),
+        max_value=int(vel_max),
+        value=(int(vel_min), int(vel_max)),
+        step=1,
+        format="%d"
+    )
+else:
+    # fallback if no velocity column: select a wide range so filtering step is no-op later
+    selected_vel = (vel_min, vel_max)
 
 # Counts (Balls-Strikes) — need to build count_str on df first
 df_temp = df.copy()
@@ -232,12 +292,45 @@ if selected_outs and outs_col:
     df_plot = df_plot[df_plot["outs_display"].isin(selected_outs)]
 if selected_pitch_types and pitch_type_col:
     df_plot = df_plot[df_plot["pitch_type_display"].isin(selected_pitch_types)]
+if selected_hittypes and hittype_col:
+    df_plot = df_plot[(df_plot[hittype_col].astype(str).apply(format_result).isin(selected_hittypes)) | (df_plot[hittype_col].isna())]
 if vel_col:
     vel_mask = df_plot[vel_col].between(selected_vel[0], selected_vel[1])
     if selected_vel != (vel_min, vel_max):
         df_plot = df_plot[vel_mask]
     else:
         df_plot = df_plot[vel_mask | df_plot[vel_col].isna()]
+if selected_results:
+    # Build mask starting as False
+    mask = pd.Series(False, index=df_plot.index)
+
+    for r in selected_results:
+        if r == "Out (all)":
+            if playresult_col in df_plot.columns:
+                mask |= df_plot[playresult_col].astype(str).eq("Out")
+            if korbb_col in df_plot.columns:
+                mask |= df_plot[korbb_col].astype(str).eq("Strikeout")
+        elif r == "Out (in play)":
+            if playresult_col in df_plot.columns:
+                mask |= df_plot[playresult_col].astype(str).eq("Out")
+        elif r == "Strikeout":
+            if korbb_col in df_plot.columns:
+                mask |= df_plot[korbb_col].astype(str).eq("Strikeout")
+        elif r == "Walk":
+            if korbb_col in df_plot.columns:
+                mask |= df_plot[korbb_col].astype(str).eq("Walk")
+        elif r in (map(format_result, df[pitchcall_col].dropna().astype(str))):
+            if pitchcall_col in df_plot.columns:
+                mask |= df_plot[pitchcall_col].astype(str).apply(format_result).eq(r)
+        else:
+            # Other results, just filter PlayResult
+            if playresult_col in df_plot.columns:
+                mask |= df_plot[playresult_col].astype(str).eq(r)
+
+    df_plot = df_plot[mask]
+
+
+
 
 if df_plot.empty:
     st.info("No data for this selection")
@@ -288,8 +381,8 @@ with col_right:
             type="circle",
             x0=x - radius, x1=x + radius,
             y0=y - radius, y1=y + radius,
-            line=dict(color="blue", width=1),
-            fillcolor="rgba(0,0,255,0.45)"
+            line=dict(color="green", width=1),
+            fillcolor="rgba(0,255,0,0.45)"
         )
 
     # axis ranges
@@ -300,7 +393,7 @@ with col_right:
 
     fig.update_xaxes(title_text="PlateLocSide (inches)", range=[x_min, x_max], scaleanchor="y", scaleratio=1, zeroline=False)
     fig.update_yaxes(title_text="PlateLocHeight (inches)", range=[y_min, y_max], zeroline=False)
-    fig.update_layout(title_text="Strike Zone (circles = 2.9 inches)", height=800, width=800, showlegend=False)
+    fig.update_layout(title_text="Pitch Locations", height=800, width=800, showlegend=False)
 
     st.plotly_chart(fig, use_container_width=True)
 
@@ -316,12 +409,4 @@ with col_left:
         st.write("Top batters (by pitch count)")
         st.table(top_batters.rename_axis("batter").reset_index(name="count"))
 
-# -----------------------------
-# Optional histogram of plate height
-# -----------------------------
-st.subheader("Pitch location distributions")
-if "platelocheight_in" in df_plot.columns:
-    h_fig = go.Figure()
-    h_fig.add_trace(go.Histogram(x=df_plot["platelocheight_in"], nbinsx=30))
-    h_fig.update_layout(title_text="Distribution of PlateLocHeight (inches)", xaxis_title="Height (in)", yaxis_title="Count")
-    st.plotly_chart(h_fig, use_container_width=True)
+

@@ -172,29 +172,36 @@ else:
                     save_schedule(st.session_state.schedule)
                     st.success("Saved PxP CSV")
 
-                    # ----- Run alignment if Trackman file exists -----
-                    trackman_path = row.get("Trackman CSV", "")
-                    if trackman_path and os.path.exists(trackman_path):
-                        try:
-                            import align  # make sure align.py is in the same folder or installed as a module
+                    # ----- Run alignment (attempt even if Trackman is missing) -----
+                    try:
+                        import align  # ensure align.py is importable
+                        df_px = pd.read_csv(path)
+
+                        # try to load Trackman if we have a path, else use None
+                        trackman_path = row.get("Trackman CSV", "") or ""
+                        if trackman_path and os.path.exists(trackman_path):
                             df_tm = pd.read_csv(trackman_path)
-                            df_px = pd.read_csv(path)
-                            game_id = f"{st.session_state.selected_year}_{safe_op}"
+                            tm_msg = "Trackman file found; running full alignment."
+                        else:
+                            df_tm = None
+                            tm_msg = "No Trackman file found; running alignment with PxP only (Trackman side will be empty/unmatched)."
 
-                            merged = align.align_game(df_tm, df_px, game_id)
+                        game_id = f"{st.session_state.selected_year}_{safe_op}"
 
-                            # Save merged CSV
-                            merged_filename = f"merged_{game_id}.csv"
-                            merged_path = os.path.join(DATA_DIR, merged_filename)
-                            merged.to_csv(merged_path, index=False)
-                            st.success(f"Alignment successful! Merged file saved to {merged_path}")
+                        # Run alignment. align_game handles None/empty Trackman (it will mark px rows as unmatched).
+                        merged = align.align_game(df_tm, df_px, game_id)
 
-                        except ValueError as e:
-                            st.error(f"Alignment failed with errors:\n{e}")
-                        except Exception as e:
-                            st.error(f"Unexpected error during alignment:\n{e}")
-                    else:
-                        st.info("Trackman file not uploaded yet. Alignment will run once both files are available.")
+                        # Save merged CSV (this will overwrite an existing merged_{game_id}.csv if present)
+                        merged_filename = f"merged_{game_id}.csv"
+                        merged_path = os.path.join(DATA_DIR, merged_filename)
+                        merged.to_csv(merged_path, index=False)
+                        st.success(f"{tm_msg} Merged file saved to {merged_path}")
+
+                    except ValueError as e:
+                        # align.align_game raises ValueError with formatted problems when anomalies are found
+                        st.error(f"Alignment failed with errors:\n{e}")
+                    except Exception as e:
+                        st.error(f"Unexpected error during alignment:\n{e}")
 
             # delete button
             if st.button("Delete game", key=f"del_{orig_idx}"):
