@@ -5,6 +5,37 @@ import os
 import json
 from datetime import datetime
 
+# ---------------------------
+# Simple login
+# ---------------------------
+
+# Stored in Streamlit secrets
+USERNAME = st.secrets["USERNAME"]
+PASSWORD = st.secrets["PASSWORD"]
+
+# Initialize login state
+if "logged_in" not in st.session_state:
+    st.session_state["logged_in"] = False
+
+# Show login form only if not logged in
+if not st.session_state["logged_in"]:
+    st.sidebar.title("Login")
+    user_input = st.sidebar.text_input("Username")
+    pw_input = st.sidebar.text_input("Password", type="password")
+    login_btn = st.sidebar.button("Login")
+
+    if login_btn:
+        if user_input == USERNAME and pw_input == PASSWORD:
+            st.session_state["logged_in"] = True
+            st.rerun()
+        else:
+            st.sidebar.error("Incorrect username or password")
+
+# Stop the app if not logged in
+if not st.session_state["logged_in"]:
+    st.stop()
+
+
 # --------- config ----------
 DATA_DIR = "data"
 SCHEDULE_FILE = os.path.join(DATA_DIR, "schedule.json")

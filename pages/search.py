@@ -2,6 +2,13 @@ import streamlit as st
 import pandas as pd
 import os
 
+def check_login():
+    if "logged_in" not in st.session_state or not st.session_state["logged_in"]:
+        st.warning("Please log in first")
+        st.stop()
+
+check_login()
+
 st.title("Search Games / Players")
 
 # Example: load all PxP CSVs

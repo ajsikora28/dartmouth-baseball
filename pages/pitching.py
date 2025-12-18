@@ -9,6 +9,13 @@ from typing import List
 from align import safe_col
 import re
 
+def check_login():
+    if "logged_in" not in st.session_state or not st.session_state["logged_in"]:
+        st.warning("Please log in first")
+        st.stop()
+
+check_login()
+
 st.set_page_config(page_title="Pitching", layout="wide")
 st.title("Pitching")
 
