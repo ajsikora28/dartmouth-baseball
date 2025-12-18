@@ -100,7 +100,7 @@ else:
     filtered_schedule = pd.DataFrame(columns=["Date", "Opponent", "Trackman CSV", "PxP CSV", "Year"])
 
 st.subheader("Season Schedule")
-st.dataframe(filtered_schedule[["Date", "Opponent", "Trackman CSV", "PxP CSV"]], use_container_width=True)
+st.dataframe(filtered_schedule[["Date", "Opponent", "Trackman CSV", "PxP CSV"]], width='stretch')
 
 # ------ Add a game form ------
 st.subheader("Add a Game")

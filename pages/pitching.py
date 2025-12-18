@@ -95,6 +95,17 @@ def ms_with_select_all(label: str, options: list, key_prefix: str) -> list:
         st.session_state[sel_key] = list(options)
         st.session_state[pending_key] = False
 
+    # Sanitize stored selection so every default value exists in current options
+    current_sel = st.session_state.get(sel_key, [])
+    if not isinstance(current_sel, list):
+        current_sel = [current_sel]
+    # Keep only values that are still present in options
+    current_sel = [v for v in current_sel if v in options]
+    # If nothing remains, default to all options so widget has a valid default
+    if not current_sel and options:
+        current_sel = list(options)
+    st.session_state[sel_key] = current_sel
+
     # Multiselect with key parameter — automatically syncs to session_state
     st.multiselect(label, options, default=st.session_state[sel_key], key=sel_key)
 
@@ -210,7 +221,7 @@ selected_hittypes = ms_with_select_all("Hit Type (for balls in play)", hittype_a
 # -----------------------------
 if vel_col and vel_col in df.columns:
     selected_vel = st.slider(
-        "Velocity (mph)",
+        "Pitch Velocity (mph)",
         min_value=int(vel_min),
         max_value=int(vel_max),
         value=(int(vel_min), int(vel_max)),
@@ -395,7 +406,7 @@ with col_right:
     fig.update_yaxes(title_text="PlateLocHeight (inches)", range=[y_min, y_max], zeroline=False)
     fig.update_layout(title_text="Pitch Locations", height=800, width=800, showlegend=False)
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
 with col_left:
     st.subheader("Summary")
@@ -408,5 +419,68 @@ with col_left:
         top_batters = df_plot[batter_col].value_counts().head(10)
         st.write("Top batters (by pitch count)")
         st.table(top_batters.rename_axis("batter").reset_index(name="count"))
+
+    # -----------------------------
+    # Statistics by count (e.g., 0-0, 0-1, 1-0)
+    # -----------------------------
+    st.subheader("Statistics by Count")
+
+    # Helper: determine if a pitch is in the (approx) strike zone
+    def in_strike_zone(row):
+        x = row.get("platelocside_in")
+        y = row.get("platelocheight_in")
+        if pd.isna(x) or pd.isna(y):
+            if row.get("zone_px") == 1:
+                return True
+            return False
+        return (x+1.45 >= zone_left and x-1.45 <= zone_right and y+1.45 >= zone_bottom and y-1.45 <= zone_top)
+
+    # Helper: determine if a pitch was a swing (best-effort using pitchcall/playresult)
+    def is_swing(row):
+        # Prefer pitchcall_col if available
+        if pitchcall_col and pitchcall_col in row.index and pd.notna(row[pitchcall_col]):
+            pc = str(row[pitchcall_col]).lower()
+            return any(tok in pc for tok in ("swing", "strikeswinging", "foul", "inplay", "ballinplay", "foulball", "hit", "foulballnotfieldable", "foulballfieldable"))
+        return False
+
+    # Build table rows per count
+    counts_sorted = sorted(df_plot["count_str"].dropna().unique())
+    rows = []
+    for cnt in counts_sorted:
+        sub = df_plot[df_plot["count_str"] == cnt]
+        n = len(sub)
+        if n == 0:
+            continue
+
+        # Zone %
+        in_zone = sub.apply(in_strike_zone, axis=1)
+        zone_pct = 100.0 * in_zone.sum() / n
+
+        # Swings and chase % (swings outside zone / pitches outside zone)
+        if pitchcall_col or playresult_col:
+            swings = sub.apply(is_swing, axis=1)
+            swings_n = swings.sum()
+            pitches_outside = (~in_zone).sum()
+            if pitches_outside > 0:
+                swings_outside = ((~in_zone) & swings).sum()
+                chase_pct = 100.0 * swings_outside / pitches_outside
+            else:
+                chase_pct = np.nan
+        else:
+            swings_n = np.nan
+            chase_pct = np.nan
+
+        rows.append({
+            "count": cnt,
+            "pitches": n,
+            "zone_pct": round(float(zone_pct), 2),
+            "swings": int(swings_n) if not (isinstance(swings_n, float) and np.isnan(swings_n)) else None,
+            "chase_pct": round(float(chase_pct), 2) if not np.isnan(chase_pct) else None,
+        })
+
+    if rows:
+        stats_df = pd.DataFrame(rows).sort_values(by="count")
+        stats_df = stats_df.set_index("count")
+        st.table(stats_df)
 
 
