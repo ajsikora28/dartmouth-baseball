@@ -1,9 +1,16 @@
 # app.py
 import streamlit as st
 import pandas as pd
-import os
-import json
 from datetime import datetime
+from supabase import create_client
+
+# Get credentials from Streamlit secrets
+supabase_url = st.secrets["supabase"]["url"]
+supabase_key = st.secrets["supabase"]["key"]
+
+# Create Supabase client
+supabase = create_client(supabase_url, supabase_key)
+
 
 # ---------------------------
 # Simple login
@@ -37,8 +44,6 @@ if not st.session_state["logged_in"]:
 
 
 # --------- config ----------
-DATA_DIR = "data"
-SCHEDULE_FILE = os.path.join(DATA_DIR, "schedule.json")
 PRIMARY_COLOR = "#00693e"
 SECONDARY_COLOR = "#12312b"
 # ---------------------------
@@ -55,38 +60,32 @@ st.markdown(f"""
 st.title("Dartmouth Baseball Analytics")
 st.header("Schedule")
 
-os.makedirs(DATA_DIR, exist_ok=True)
+@st.cache_data(ttl=60)
+def load_seasons():
+    resp = (
+        supabase
+        .table("games")
+        .select("season")
+        .execute()
+    )
 
-# ----- helpers for persistence -----
-def load_schedule() -> pd.DataFrame:
-    if os.path.exists(SCHEDULE_FILE):
-        try:
-            with open(SCHEDULE_FILE, "r", encoding="utf8") as fh:
-                data = json.load(fh)
-            return pd.DataFrame(data)
-        except Exception:
-            return pd.DataFrame(columns=["Date", "Opponent", "Trackman CSV", "PxP CSV", "Year"])
-    else:
-        return pd.DataFrame(columns=["Date", "Opponent", "Trackman CSV", "PxP CSV", "Year"])
+    if resp.error or not resp.data:
+        return []
 
-def save_schedule(df: pd.DataFrame):
-    # convert datelike objects to ISO strings for JSON
-    copy = df.copy()
-    if "Date" in copy.columns:
-        copy["Date"] = copy["Date"].astype(str)
-    with open(SCHEDULE_FILE, "w", encoding="utf8") as fh:
-        json.dump(copy.to_dict(orient="records"), fh, indent=2, ensure_ascii=False)
+    seasons = sorted(
+        {row["season"] for row in resp.data if row.get("season") is not None}
+    )
+    return seasons
 
 # ----- session state initialization -----
 if "years" not in st.session_state:
-    st.session_state.years = [2023, 2024, 2025]
+    st.session_state.years = load_seasons()
 
 if "selected_year" not in st.session_state:
-    st.session_state.selected_year = st.session_state.years[0]
-
-# load schedule into session state on first run
-if "schedule" not in st.session_state:
-    st.session_state.schedule = load_schedule()
+    if st.session_state.years:
+        st.session_state.selected_year = st.session_state.years[-1]  # most recent
+    else:
+        st.session_state.selected_year = datetime.now().year
 
 # helper to get year from date-like values
 def _get_year(d):
@@ -102,36 +101,46 @@ def _get_year(d):
 year_options = st.session_state.years + ["Add new year..."]
 
 # show selectbox; choose index of selected_year if present
-index = year_options.index(st.session_state.selected_year) if st.session_state.selected_year in year_options else 0
+if st.session_state.selected_year in st.session_state.years:
+    index = st.session_state.years.index(st.session_state.selected_year)
+else:
+    index = 0
 choice = st.selectbox("Select Season", year_options, index=index)
 
 if choice == "Add new year...":
-    # Using a form so submit triggers a clean rerun
-    with st.form("add_year_form", clear_on_submit=True):
-        new_year = st.number_input("Enter new year", min_value=2000, max_value=2100, step=1, value=datetime.now().year)
-        submitted = st.form_submit_button("Add year")
-        if submitted:
-            if new_year not in st.session_state.years:
-                st.session_state.years.append(int(new_year))
-                st.session_state.years.sort()
-            st.session_state.selected_year = int(new_year)
-            st.success(f"Added and selected {new_year}")
-            # persist nothing else needed here — the rerun will update UI
+    st.info("Seasons are created automatically when you add a game.")
+    st.stop()
 else:
     st.session_state.selected_year = choice
 
 st.write(f"Current selected year: **{st.session_state.selected_year}**")
 
-# ------ Display schedule filtered by year ------
-df_schedule = st.session_state.schedule.copy()
-# normalize Date column to string for display
-if not df_schedule.empty and "Year" in df_schedule.columns:
-    filtered_schedule = df_schedule[df_schedule["Year"] == int(st.session_state.selected_year)]
+# ------ Load schedule from Supabase ------
+resp = (
+    supabase
+    .table("games")
+    .select("*")
+    .eq("season", int(st.session_state.selected_year))
+    .order("date")
+    .execute()
+)
+
+if resp.error:
+    st.error(f"Error loading schedule: {resp.error.message}")
+    df_schedule = pd.DataFrame()
 else:
-    filtered_schedule = pd.DataFrame(columns=["Date", "Opponent", "Trackman CSV", "PxP CSV", "Year"])
+    df_schedule = pd.DataFrame(resp.data)
+
 
 st.subheader("Season Schedule")
-st.dataframe(filtered_schedule[["Date", "Opponent", "Trackman CSV", "PxP CSV"]], width='stretch')
+
+if df_schedule.empty:
+    st.info("No games added yet for this season.")
+else:
+    st.dataframe(
+        df_schedule[["date", "opponent"]],
+        width="stretch"
+    )
 
 # ------ Add a game form ------
 st.subheader("Add a Game")
@@ -142,102 +151,138 @@ with st.form("add_game_form", clear_on_submit=True):
     add_game_btn = st.form_submit_button("Add Game")
     if add_game_btn:
         if not opponent_input:
-            st.warning("Please enter an opponent name.")
+            st.warning("Please enter an opponent name (for intrasquad, enter \"Intrasquad\").")
+        existing = (
+            supabase
+            .table("games")
+            .select("id")
+            .eq("season", int(_get_year(date_input)))
+            .eq("date", str(date_input))
+            .eq("opponent", opponent_input)
+            .execute()
+        )
+        if existing.data:
+            st.warning("This game already exists.")
         else:
-            new_row = {
-                "Date": str(date_input),  # store as string for JSON
-                "Opponent": opponent_input,
-                "Trackman CSV": "",
-                "PxP CSV": "",
-                "Year": int(_get_year(date_input))
-            }
-            st.session_state.schedule = pd.concat([st.session_state.schedule, pd.DataFrame([new_row])], ignore_index=True)
-            save_schedule(st.session_state.schedule)
-            st.success("Game added!")
+            supabase.table("games").insert({
+                "season": int(_get_year(date_input)),
+                "date": str(date_input),
+                "opponent": opponent_input
+            }).execute()
 
-# ------ Manage existing games (one at a time) ------
+            load_seasons.clear()
+            st.session_state.years = load_seasons()
+            st.session_state.selected_year = int(_get_year(date_input))
+
+            st.success("Game added!")
+            st.rerun()
+
+
+# ------ Manage existing games ------
 st.subheader("Manage Games")
-# Only show games for the selected season
-season_games = st.session_state.schedule[st.session_state.schedule["Year"] == int(st.session_state.selected_year)].reset_index()
-if season_games.empty:
-    st.info("No games added yet for this season.")
+
+if df_schedule.empty:
+    st.info("No games to manage.")
 else:
-    # build label and original index mapping
-    labels = [f"{row['Date']} — {row['Opponent']}" for _, row in season_games.iterrows()]
+    labels = [
+        f"{row['date']} — {row['opponent']}"
+        for _, row in df_schedule.iterrows()
+    ]
+
     sel = st.selectbox("Choose a game to manage", ["(select)"] + labels)
+
     if sel != "(select)":
         sel_idx = labels.index(sel)
-        orig_idx = int(season_games.loc[sel_idx, "index"])
-        row = st.session_state.schedule.loc[orig_idx]
+        game = df_schedule.iloc[sel_idx]
+        game_id = game["id"]
+        opponent = game["opponent"]
+        season = game["season"]
 
-        # Use expander to show the manage UI
-        with st.expander(f"Manage: {row['Date']} — {row['Opponent']}", expanded=True):
-            st.write(f"Trackman file: {row.get('Trackman CSV','') or 'None'}")
-            st.write(f"PxP file: {row.get('PxP CSV','') or 'None'}")
+        safe_op = (
+            "".join(c for c in opponent if c.isalnum() or c in (" ", "-", "_"))
+            .strip()
+            .replace(" ", "_")
+        )
 
-            # upload Trackman
-            with st.form(f"upload_trackman_{orig_idx}", clear_on_submit=True):
-                trackman_file = st.file_uploader("Upload Trackman CSV", type=["csv"], key=f"tm_{orig_idx}")
+        with st.expander(f"Manage: {game['date']} — {opponent}", expanded=True):
+
+            # ---- Upload Trackman ----
+            with st.form(f"upload_trackman_{game_id}", clear_on_submit=True):
+                trackman_file = st.file_uploader(
+                    "Upload Trackman CSV",
+                    type=["csv"]
+                )
                 submit_tm = st.form_submit_button("Save Trackman")
+
                 if submit_tm and trackman_file:
-                    safe_op = "".join(c for c in row['Opponent'] if c.isalnum() or c in (" ", "-", "_")).strip().replace(" ", "_")
-                    filename = f"trackman_{st.session_state.selected_year}_{safe_op}.csv"
-                    path = os.path.join(DATA_DIR, filename)
-                    with open(path, "wb") as fh:
-                        fh.write(trackman_file.getbuffer())
-                    st.session_state.schedule.at[orig_idx, "Trackman CSV"] = path
-                    save_schedule(st.session_state.schedule)
-                    st.success("Saved Trackman CSV")
+                    storage_path = f"{season}/{safe_op}/trackman.csv"
 
-            # upload PxP
-            with st.form(f"upload_pxp_{orig_idx}", clear_on_submit=True):
-                pxp_file = st.file_uploader("Upload play-by-play (PxP) CSV", type=["csv"], key=f"pxp_{orig_idx}")
+                    supabase.storage.from_("game-data").upload(
+                        storage_path,
+                        trackman_file.getvalue(),
+                        file_options={
+                            "content-type": "text/csv",
+                            "upsert": True
+                        }
+                    )
+
+
+                    supabase.table("game_files") \
+                        .delete() \
+                        .eq("game_id", game_id) \
+                        .eq("file_type", "trackman") \
+                        .execute()
+
+                    supabase.table("game_files").insert({
+                        "game_id": game_id,
+                        "file_type": "trackman",
+                        "storage_path": storage_path
+                    }).execute()
+
+
+                    st.success("Trackman uploaded")
+
+
+            # ---- Upload PxP ----
+            with st.form(f"upload_pxp_{game_id}", clear_on_submit=True):
+                pxp_file = st.file_uploader(
+                    "Upload play-by-play (PxP) CSV",
+                    type=["csv"]
+                )
                 submit_pxp = st.form_submit_button("Save PxP")
+
                 if submit_pxp and pxp_file:
-                    safe_op = "".join(c for c in row['Opponent'] if c.isalnum() or c in (" ", "-", "_")).strip().replace(" ", "_")
-                    filename = f"pxp_{st.session_state.selected_year}_{safe_op}.csv"
-                    path = os.path.join(DATA_DIR, filename)
-                    with open(path, "wb") as fh:
-                        fh.write(pxp_file.getbuffer())
-                    st.session_state.schedule.at[orig_idx, "PxP CSV"] = path
-                    save_schedule(st.session_state.schedule)
-                    st.success("Saved PxP CSV")
+                    storage_path = f"{season}/{safe_op}/pxp.csv"
 
-                    # ----- Run alignment (attempt even if Trackman is missing) -----
-                    try:
-                        import align  # ensure align.py is importable
-                        df_px = pd.read_csv(path)
+                    supabase.storage.from_("game-data").upload(
+                        storage_path,
+                        pxp_file.getvalue(),
+                        file_options={
+                            "content-type": "text/csv",
+                            "upsert": True
+                        }
+                    )
 
-                        # try to load Trackman if we have a path, else use None
-                        trackman_path = row.get("Trackman CSV", "") or ""
-                        if trackman_path and os.path.exists(trackman_path):
-                            df_tm = pd.read_csv(trackman_path)
-                            tm_msg = "Trackman file found; running full alignment."
-                        else:
-                            df_tm = None
-                            tm_msg = "No Trackman file found; running alignment with PxP only (Trackman side will be empty/unmatched)."
 
-                        game_id = f"{st.session_state.selected_year}_{safe_op}"
+                    supabase.table("game_files") \
+                        .delete() \
+                        .eq("game_id", game_id) \
+                        .eq("file_type", "pxp") \
+                        .execute()
 
-                        # Run alignment. align_game handles None/empty Trackman (it will mark px rows as unmatched).
-                        merged = align.align_game(df_tm, df_px, game_id)
+                    supabase.table("game_files").insert({
+                        "game_id": game_id,
+                        "file_type": "pxp",
+                        "storage_path": storage_path
+                    }).execute()
 
-                        # Save merged CSV (this will overwrite an existing merged_{game_id}.csv if present)
-                        merged_filename = f"merged_{game_id}.csv"
-                        merged_path = os.path.join(DATA_DIR, merged_filename)
-                        merged.to_csv(merged_path, index=False)
-                        st.success(f"{tm_msg} Merged file saved to {merged_path}")
 
-                    except ValueError as e:
-                        # align.align_game raises ValueError with formatted problems when anomalies are found
-                        st.error(f"Alignment failed with errors:\n{e}")
-                    except Exception as e:
-                        st.error(f"Unexpected error during alignment:\n{e}")
+                    st.success("PxP uploaded")
 
-            # delete button
-            if st.button("Delete game", key=f"del_{orig_idx}"):
-                st.session_state.schedule = st.session_state.schedule.drop(orig_idx).reset_index(drop=True)
-                save_schedule(st.session_state.schedule)
+
+            # ---- Delete game ----
+            if st.button("Delete game"):
+                supabase.table("game_files").delete().eq("game_id", game_id).execute()
+                supabase.table("games").delete().eq("id", game_id).execute()
                 st.success("Game deleted")
-                # After deletion, selecting the default in the next run is fine.
-
+                st.rerun()
