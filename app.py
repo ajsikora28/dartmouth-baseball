@@ -69,7 +69,7 @@ def load_seasons():
         .execute()
     )
 
-    if resp.error or not resp.data:
+    if resp.status_code != 200 or not resp.data:
         return []
 
     seasons = sorted(
@@ -125,11 +125,16 @@ resp = (
     .execute()
 )
 
-if resp.error:
-    st.error(f"Error loading schedule: {resp.error.message}")
+# Use model_dump() to access the data
+resp_dict = resp.model_dump()  # converts Pydantic object to dict
+
+# resp_dict contains keys: "data", "count", etc.
+if resp_dict.get("status_code") != 200  or not resp.data:  # or check if "data" is None
+    err_msg = resp_dict.get("message", "Unknown error")
+    st.error(f"Error loading schedule: {err_msg}")
     df_schedule = pd.DataFrame()
 else:
-    df_schedule = pd.DataFrame(resp.data)
+    df_schedule = pd.DataFrame(resp_dict.get("data", []))
 
 
 st.subheader("Season Schedule")
