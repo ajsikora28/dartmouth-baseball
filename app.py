@@ -79,10 +79,7 @@ def _get_year(d):
 def load_seasons():
     resp = supabase.table("games").select("season").execute()
     data = _safe_data(resp)
-
-    seasons = sorted(
-        {row["season"] for row in data if row.get("season") is not None}
-    )
+    seasons = sorted({row["season"] for row in data if row.get("season") is not None})
     return seasons
 
 # ---------------------------
@@ -93,9 +90,7 @@ if "years" not in st.session_state:
 
 if "selected_year" not in st.session_state:
     st.session_state.selected_year = (
-        st.session_state.years[-1]
-        if st.session_state.years
-        else datetime.now().year
+        st.session_state.years[-1] if st.session_state.years else None
     )
 
 # ---------------------------
@@ -113,25 +108,27 @@ choice = st.selectbox("Select Season", year_options, index=index)
 
 if choice == "Add new year...":
     st.info("Seasons are created automatically when you add a game.")
-    st.stop()
+    st.session_state.selected_year = None
 else:
-    st.session_state.selected_year = choice
+    st.session_state.selected_year = int(choice)
 
 st.write(f"Current selected year: **{st.session_state.selected_year}**")
 
 # ---------------------------
 # Load schedule
 # ---------------------------
-resp = (
-    supabase
-    .table("games")
-    .select("*")
-    .eq("season", int(st.session_state.selected_year))
-    .order("date")
-    .execute()
-)
-
-df_schedule = pd.DataFrame(_safe_data(resp))
+if st.session_state.selected_year is not None:
+    resp = (
+        supabase
+        .table("games")
+        .select("*")
+        .eq("season", st.session_state.selected_year)
+        .order("date")
+        .execute()
+    )
+    df_schedule = pd.DataFrame(_safe_data(resp))
+else:
+    df_schedule = pd.DataFrame()
 
 # ---------------------------
 # Display schedule
@@ -149,9 +146,8 @@ else:
 st.subheader("Add a Game")
 
 with st.form("add_game_form", clear_on_submit=True):
-    default_date = datetime(
-        year=int(st.session_state.selected_year), month=1, day=1
-    ).date()
+    default_year = st.session_state.selected_year or datetime.now().year
+    default_date = datetime(year=default_year, month=1, day=1).date()
     date_input = st.date_input("Date", value=default_date)
     opponent_input = st.text_input("Opponent")
     submit = st.form_submit_button("Add Game")
@@ -160,11 +156,12 @@ with st.form("add_game_form", clear_on_submit=True):
         if not opponent_input:
             st.warning('Please enter an opponent name (use "Intrasquad" if applicable).')
         else:
+            season_year = _get_year(date_input)
             existing = (
                 supabase
                 .table("games")
                 .select("id")
-                .eq("season", int(_get_year(date_input)))
+                .eq("season", season_year)
                 .eq("date", str(date_input))
                 .eq("opponent", opponent_input)
                 .execute()
@@ -174,14 +171,14 @@ with st.form("add_game_form", clear_on_submit=True):
                 st.warning("This game already exists.")
             else:
                 supabase.table("games").insert({
-                    "season": int(_get_year(date_input)),
+                    "season": season_year,
                     "date": str(date_input),
                     "opponent": opponent_input,
                 }).execute()
 
                 load_seasons.clear()
                 st.session_state.years = load_seasons()
-                st.session_state.selected_year = int(_get_year(date_input))
+                st.session_state.selected_year = season_year
 
                 st.success("Game added!")
                 st.rerun()
@@ -194,11 +191,7 @@ st.subheader("Manage Games")
 if df_schedule.empty:
     st.info("No games to manage.")
 else:
-    labels = [
-        f"{row['date']} — {row['opponent']}"
-        for _, row in df_schedule.iterrows()
-    ]
-
+    labels = [f"{row['date']} — {row['opponent']}" for _, row in df_schedule.iterrows()]
     sel = st.selectbox("Choose a game to manage", ["(select)"] + labels)
 
     if sel != "(select)":
@@ -207,11 +200,7 @@ else:
         opponent = game["opponent"]
         season = game["season"]
 
-        safe_op = (
-            "".join(c for c in opponent if c.isalnum() or c in (" ", "-", "_"))
-            .strip()
-            .replace(" ", "_")
-        )
+        safe_op = "".join(c for c in opponent if c.isalnum() or c in (" ", "-", "_")).strip().replace(" ", "_")
 
         with st.expander(f"Manage: {game['date']} — {opponent}", expanded=True):
 
